@@ -47,6 +47,57 @@ docker run -d --name iptv-balance \
 docker compose up -d
 ```
 
+<details>
+<summary><b>production-пример docker-compose.yml</b> (read-only fs, лимиты, логи, healthcheck)</summary>
+
+```yaml
+services:
+  iptv-balance:
+    image: alexkuryshko/iptv-balance:latest
+    container_name: iptv-balance
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=80
+    volumes:
+      - iptv-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    mem_limit: 512m
+    cpus: 2.0
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','80')+'/api/status',timeout=5).read()\" || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  iptv-data:
+```
+
+Управление:
+
+```bash
+docker compose ps                                # статус
+docker compose logs -f                           # логи
+docker compose pull && docker compose up -d      # обновить образ
+docker compose down                              # остановить
+```
+
+</details>
+
 Откройте `http://<IP-сервера>/`, войдите в кабинет new.tv.team (логин/пароль +
 капча), выберите плейлист (по умолчанию — TiviMate), укажите адрес подключения —
 и вставьте в плеер `http://<адрес>/plst.m3u8`.
