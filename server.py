@@ -1521,7 +1521,6 @@ DASHBOARD_HTML = """<!doctype html>
         <select id="sel"><option value="all">Все серверы</option><option value="current">Текущий сервер</option></select>
       </div>
       <div class="checks">
-        <label class="check"><input type="checkbox" id="full" checked> Полный тест (Ping + Скорость)</label>
         <label class="check"><input type="checkbox" id="cabAuto" checked onchange="cabSetAuto(this.checked)"> Авто-применять лучший сервер</label>
       </div>
       <button class="btn-run" id="runBtn" onclick="runTest()"><span class="svg">__IC_PLAY__</span><span id="runLabel">Запустить тест</span></button>
@@ -1568,6 +1567,14 @@ const fmtAge = s => s==null ? '—' : s<60 ? s+'с назад' : s<3600 ? Math.f
 let autoRefresh = null;
 let viewMode = localStorage.tvView || 'grid';
 let cabTestRunning = false;
+
+// --- Test session persistence (resume after page refresh) ----------------- //
+const TEST_SESSION_KEY = 'iptvBalanceTestSession';
+const SESSION_STALE_MS = 50*60*1000; // ~client-measurement TTL (60 min) on backend
+function saveSession(s){ try{ localStorage.setItem(TEST_SESSION_KEY, JSON.stringify(s)); }catch(e){} }
+function loadSession(){ try{ return JSON.parse(localStorage.getItem(TEST_SESSION_KEY)||'null'); }catch(e){ return null; } }
+function clearSession(){ try{ localStorage.removeItem(TEST_SESSION_KEY); }catch(e){} }
+let cabTestAbort = false;
 
 function metricCell(cls, ic, key, val, unit){
   return '<div class="metric '+cls+'"><div class="ic">'+SVG(ic)+'</div>'+
@@ -1801,10 +1808,11 @@ async function cabTestServer(s, withHls){
   return r;
 }
 async function runTest(){
+  if(cabTestRunning){ return; }
   const mode = $('#sel') ? $('#sel').value : 'all';
-  const withHls = $('#full') ? $('#full').checked : true;
+  const withHls = true;   // полный тест (Ping + Скорость + HLS) — всегда
   $('#runBtn').disabled = true;
-  cabTestRunning = true;
+  cabTestRunning = true; cabTestAbort = false;
   $('#runLabel').innerHTML = SVG('spinner','spin')+' Запускаю…';
   try{
     const r = await fetch('/api/status?_='+Date.now());
@@ -1817,51 +1825,97 @@ async function runTest(){
     } else if(mode!=='all'){
       servers = servers.filter(s=>s.host===mode);
     }
-    if(!servers.length){ $('#footStat').textContent='Нет серверов для теста'; $('#runBtn').disabled=false; $('#runLabel').textContent='Запустить тест'; return; }
-    const results=[];
-    for(let i=0;i<servers.length;i++){
-      const s=servers[i];
-      $('#runLabel').innerHTML = SVG('spinner','spin')+' '+(i+1)+'/'+servers.length+' '+s.host;
-      $('#footStat').innerHTML = '⏳ '+(i+1)+'/'+servers.length+' · '+s.host+' (ping→download'+(withHls?'→hls':'')+', ~'+(withHls?15:11)+'с/сервер)';
-      const res = await cabTestServer(s, withHls);
-      results.push(res);
-      // report to backend so selection + cards use cabinet metrics
-      fetch('/api/report',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({measurements:[{host:s.host, ping_ms:res.ping_ms, jitter_ms:res.jitter_ms,
-          download_mbps:res.download_mbps, qos:res.hls_qos, mos:res.hls_mos,
-          score:res.score, hls_qos:res.hls_qos, hls_mos:res.hls_mos}]})});
-      await load();
-    }
-    $('#footStat').innerHTML = 'Готово. Протестировано '+results.length+' серверов (cabinet-style).';
-    // auto-apply best server after the test if the checkbox is on.
-    // Use the highest-score COMPLETED server (backend best_host is already
-    // score-based). Don't gate on the qualify filter — the user explicitly
-    // asked to apply the best, and the backend will pick the best available.
-    if($('#cabAuto') && $('#cabAuto').checked){
-      const done = results.filter(r=>r.status==='completed' && r.score!=null);
-      if(done.length){
-        done.sort((a,b)=>(b.score||0)-(a.score||0));
-        $('#footStat').innerHTML += ' Применяю лучший: <b>'+done[0].host+'</b> (score '+done[0].score+')…';
-        try{
-          const r = await fetch('/api/cabinet/apply-best',{method:'POST'});
-          const ad = await r.json();
-          if(ad.applied){
-            $('#footStat').innerHTML += ' ✅ применён '+ad.best_host+'. Плейлист обновляется в фоне (~30с).';
-          } else {
-            $('#footStat').innerHTML += ' ℹ️ '+(ad.reason||'не применён');
-          }
-        }catch(e){
-          $('#footStat').innerHTML += ' ❌ ошибка применения: '+e;
-        }
-        loadCabinet();
-      } else {
-        $('#footStat').innerHTML += ' Нет завершённых замеров — применять нечего.';
-      }
-    }
-  }catch(e){ $('#footStat').textContent='Ошибка: '+e; }
+    if(!servers.length){ $('#footStat').textContent='Нет серверов для теста'; $('#runBtn').disabled=false; $('#runLabel').textContent='Запустить тест'; cabTestRunning=false; return; }
+    const session = {startedAt:Date.now(), mode, withHls, servers, doneHosts:[], total:servers.length};
+    saveSession(session);
+    await runTestLoop(session, false);
+  }catch(e){ $('#footStat').textContent='Ошибка: '+e; clearSession(); }
   cabTestRunning = false;
   $('#runLabel').textContent='Запустить тест'; $('#runBtn').disabled=false;
   loadCabinet();
+}
+
+// Shared measurement loop used by both runTest() and maybeResumeTest().
+// `session` = {servers, doneHosts, withHls, total, startedAt, mode}.
+// `isResume` only affects the banner wording. Iterates servers not yet in
+// doneHosts, reports each to /api/report, persists progress to localStorage,
+// and on full completion clears the session and auto-applies the best server
+// (if #cabAuto is checked). Honours cabTestAbort (Stop button) — aborts
+// without applying and clears the session.
+async function runTestLoop(session, isResume){
+  const withHls = session.withHls;
+  const remaining = session.servers.filter(x => !(session.doneHosts||[]).includes(x.host));
+  const doneCount = (session.doneHosts||[]).length;
+  const results = [];
+  for(let i=0;i<remaining.length;i++){
+    if(cabTestAbort){ break; }
+    const s = remaining[i];
+    const doneSoFar = doneCount + i;
+    $('#runLabel').innerHTML = SVG('spinner','spin')+' '+(doneSoFar+1)+'/'+session.total+' '+s.host;
+    $('#footStat').innerHTML = (isResume?'↻ Продолжаю тест':'⏳ Тест')+' '+(doneSoFar+1)+'/'+session.total+' · '+s.host+
+      ' <button onclick="stopTest()" style="margin-left:8px;padding:2px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg2);color:#fca5a5;cursor:pointer">Остановить</button>';
+    const res = await cabTestServer(s, withHls);
+    results.push(res);
+    fetch('/api/report',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({measurements:[{host:s.host, ping_ms:res.ping_ms, jitter_ms:res.jitter_ms,
+        download_mbps:res.download_mbps, qos:res.hls_qos, mos:res.hls_mos,
+        score:res.score, hls_qos:res.hls_qos, hls_mos:res.hls_mos}]})});
+    (session.doneHosts = session.doneHosts||[]).push(s.host);
+    saveSession(session);
+    await load();
+  }
+  if(cabTestAbort){
+    clearSession();
+    $('#footStat').innerHTML = 'Тест остановлен. Лучший сервер не применён.';
+    return;
+  }
+  // full completion (all session servers done) — only here do we apply best
+  const allDone = (session.doneHosts||[]).length >= session.total;
+  if(!allDone){
+    // loop exited early without abort (shouldn't normally happen) — keep session
+    return;
+  }
+  clearSession();
+  $('#footStat').innerHTML = 'Готово. Протестировано '+session.total+' серверов (cabinet-style).';
+  if($('#cabAuto') && $('#cabAuto').checked){
+    // best_host is score-based on the backend; apply it (force=True, sync set).
+    try{
+      const r = await fetch('/api/cabinet/apply-best',{method:'POST'});
+      const ad = await r.json();
+      if(ad.applied){
+        $('#footStat').innerHTML += ' ✅ применён '+ad.best_host+'. Плейлист обновляется в фоне (~30с).';
+      } else {
+        $('#footStat').innerHTML += ' ℹ️ '+(ad.reason||'не применён');
+      }
+    }catch(e){
+      $('#footStat').innerHTML += ' ❌ ошибка применения: '+e;
+    }
+    loadCabinet();
+  }
+}
+
+// On page load, resume an interrupted test from localStorage (if fresh).
+async function maybeResumeTest(){
+  if(cabTestRunning){ return; }
+  const s = loadSession();
+  if(!s || !s.servers || !s.servers.length){ return; }
+  if(Date.now() - (s.startedAt||0) > SESSION_STALE_MS){ clearSession(); return; }
+  const doneHosts = s.doneHosts||[];
+  const remaining = s.servers.filter(x => !doneHosts.includes(x.host));
+  if(!remaining.length){ clearSession(); return; } // already complete
+  cabTestRunning = true; cabTestAbort = false;
+  $('#runBtn').disabled = true;
+  $('#runLabel').innerHTML = SVG('spinner','spin')+' Продолжаю…';
+  try{
+    await runTestLoop(s, true);
+  }catch(e){ $('#footStat').textContent='Ошибка возобновления: '+e; clearSession(); }
+  cabTestRunning = false;
+  $('#runLabel').textContent='Запустить тест'; $('#runBtn').disabled=false;
+  loadCabinet();
+}
+
+function stopTest(){
+  cabTestAbort = true;
 }
 async function loadConfig(){
   try{
@@ -2031,6 +2085,7 @@ function fallbackCopy(txt,cb){
 loadConfig();
 load();
 loadCabinet();
+maybeResumeTest();
 
 /* ---------------- Cabinet ---------------- */
 let capData = null;       // {captchaId, baseImage, pieceImage, width, height, knob}
