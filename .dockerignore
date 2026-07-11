@@ -1,0 +1,10 @@
+config.json
+.cabinet_cookies.txt
+server.log
+__pycache__/
+*.pyc
+playlist.m3u8
+index-_VER13Vg.js
+Личный кабинет IP-телевидения.html
+run.sh
+.git/

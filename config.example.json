@@ -1,0 +1,17 @@
+{
+  "playlist_url": "",
+  "listen_host": "0.0.0.0",
+  "listen_port": 80,
+  "refresh_playlist_minutes": 360,
+  "refresh_measure_minutes": 30,
+  "refresh_cabinet_minutes": 10,
+  "measure_timeout_seconds": 3,
+  "client_measure_ttl_minutes": 60,
+  "fallback_host": "ru3.hls.gd",
+  "rewrite_hosts": false,
+  "proxy_streams": true,
+  "cabinet_api_base": "https://new.tv.team",
+  "cabinet_user": "",
+  "cabinet_password": "",
+  "connect_addr": ""
+}
