@@ -1284,7 +1284,7 @@ DASHBOARD_HTML = """<!doctype html>
 <body>
 <div class="wrap">
   <header>
-    <div class="logo" style="width:46px;height:46px;border-radius:12px;overflow:hidden;background:#000;flex:none"><img src="/logo.png" alt="logo" style="width:100%;height:100%;object-fit:cover;display:block"></div>
+    <div class="logo" style="width:46px;height:46px;border-radius:12px;overflow:hidden;background:#000;box-shadow:none;flex:none"><img src="/logo.png" alt="logo" style="width:100%;height:100%;object-fit:cover;display:block"></div>
     <div class="titles">
       <h1>IPTV Balance</h1>
       <div class="sub">Автоподбор лучшего сервера и плейлист new.tv.team</div>
