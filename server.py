@@ -20,6 +20,7 @@ import math
 import os
 import re
 import socket
+import ssl
 import sys
 import threading
 import time
@@ -413,6 +414,15 @@ CABINET_COOKIE_FILE = os.path.join(DATA_DIR, ".cabinet_cookies.txt")
 UA_CAB = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 
 
+def _unverified_ssl_context() -> ssl.SSLContext:
+    """SSL context that skips certificate verification (for expired/self-signed
+    cabinet certs). Use only for cabinet API calls, not for stream proxying."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
 class Cabinet:
     """Thin client for the new.tv.team cabinet v3 API.
 
@@ -421,17 +431,22 @@ class Cabinet:
     """
 
     def __init__(self, base: str = CABINET_BASE,
-                 cookie_file: str = CABINET_COOKIE_FILE) -> None:
+                 cookie_file: str = CABINET_COOKIE_FILE,
+                 insecure_ssl: bool = False) -> None:
         self.base = base.rstrip("/")
         self.cookie_file = cookie_file
+        self.insecure_ssl = insecure_ssl
         self.jar = http.cookiejar.LWPCookieJar(cookie_file)
         if os.path.exists(cookie_file):
             try:
                 self.jar.load(ignore_discard=True, ignore_expires=True)
             except Exception:  # noqa: BLE001
                 pass
-        self.opener = urllib.request.build_opener(
-            urllib.request.HTTPCookieProcessor(self.jar))
+        handlers: list[Any] = [urllib.request.HTTPCookieProcessor(self.jar)]
+        if insecure_ssl:
+            handlers.append(urllib.request.HTTPSHandler(
+                context=_unverified_ssl_context()))
+        self.opener = urllib.request.build_opener(*handlers)
         self.opener.addheaders = [
             ("User-Agent", UA_CAB),
             ("Accept", "application/json"),
@@ -3092,7 +3107,13 @@ def main() -> int:
     # Cabinet integration
     cab_user = config.get("cabinet_user", "")
     cab_pass = config.get("cabinet_password", "")
-    cabinet = Cabinet(config.get("cabinet_api_base", CABINET_BASE))
+    cabinet = Cabinet(
+        config.get("cabinet_api_base", CABINET_BASE),
+        insecure_ssl=bool(config.get("cabinet_insecure_ssl", True)),
+    )
+    if cabinet.insecure_ssl:
+        print("[cabinet] SSL certificate verification disabled for cabinet API "
+              "(cabinet_insecure_ssl=true)", flush=True)
     cab_state = CabinetState(cabinet, cab_user, cab_pass)
     # Resolve session from persisted cookies before the first playlist fetch
     # so the initial download can go through the cabinet API (fresh tokens).

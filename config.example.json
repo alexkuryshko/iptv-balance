@@ -11,6 +11,7 @@
   "rewrite_hosts": false,
   "proxy_streams": true,
   "cabinet_api_base": "https://new.tv.team",
+  "cabinet_insecure_ssl": true,
   "cabinet_user": "",
   "cabinet_password": "",
   "connect_addr": "",
