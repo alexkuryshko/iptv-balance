@@ -1828,10 +1828,17 @@ async function loadConfig(){
     const r = await fetch('/api/config?_='+Date.now());
     const d = await r.json();
     $('#plUrl').value = d.playlist_url || '';
-    $('#connAddr').value = d.connect_addr || '';
-    $('#connScheme').value = (d.connect_scheme || 'http') === 'https' ? 'https' : 'http';
-    cfgConnectAddr = d.connect_addr || '';
-    cfgConnectScheme = d.connect_scheme || 'http';
+    const conn = d.connect_addr || '';
+    // If no fixed address is configured, show the IP/host the user is browsing
+    // from (location.host = hostname:port) so the field isn't empty and the
+    // user sees the effective address. cfgConnectAddr stays empty so the
+    // backend keeps using the Host header for the playlist URLs.
+    $('#connAddr').value = conn || location.host;
+    let sch = (d.connect_scheme || 'http') === 'https' ? 'https' : 'http';
+    if (!conn && location.protocol === 'https:') sch = 'https'; // match browsing scheme
+    $('#connScheme').value = sch;
+    cfgConnectAddr = conn;
+    cfgConnectScheme = sch;
     updatePlInfo(d);
     updatePlaylistUrl();
   }catch(e){ $('#plInfo').textContent = 'Ошибка загрузки настроек: '+e; }
