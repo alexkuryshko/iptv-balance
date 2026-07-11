@@ -1237,6 +1237,9 @@ DASHBOARD_HTML = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" type="image/png" href="/logo.png">
 <link rel="apple-touch-icon" href="/logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Exo+2:wght@300;400;600;800&display=swap" rel="stylesheet">
 <title>IPTV Balance</title>
 <style>
   :root{
@@ -1249,7 +1252,9 @@ DASHBOARD_HTML = """<!doctype html>
     --grad-best: linear-gradient(135deg,#facc15 0%,#f59e0b 100%);
   }
   *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+  /* Exo 2 applied site-wide (overrides inline monospace styles too) */
+  *,*::before,*::after{font-family:"Exo 2",-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif !important}
+  body{font-family:"Exo 2",-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
        background:radial-gradient(1200px 600px at 10% -10%,#1e2a55 0%,transparent 60%),
                   radial-gradient(1000px 500px at 100% 0%,#0e2a3a 0%,transparent 55%),
                   var(--bg);
