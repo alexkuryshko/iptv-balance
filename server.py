@@ -105,6 +105,84 @@ def _compute_mos(ping_ms: float | None, jitter_ms: float | None,
     return round(max(1.0, min(4.5, mos)), 2)
 
 
+def _cabinet_score(ping_ms: float | None, jitter_ms: float | None,
+                   download_mbps: float | None,
+                   hls_qos: float | None = None) -> float | None:
+    """Mirror of the new.tv.team cabinet's client-side score (Z), 0..100.
+
+    Weights: ping 15% + jitter 15% + download 50% + hls_qos 20% (when HLS was
+    tested); without HLS the partial is divided by 0.8 to renormalise to 100.
+    Used for best-server selection so the service agrees with the cabinet."""
+    if ping_ms is None and jitter_ms is None and download_mbps is None:
+        return None
+    s = 0.0
+    if ping_ms is not None and ping_ms == ping_ms:
+        s += max(0.0, 100.0 - ping_ms) * 0.15
+    if jitter_ms is not None and jitter_ms == jitter_ms:
+        s += max(0.0, 100.0 - (jitter_ms or 0.0) * 10.0) * 0.15
+    if download_mbps is not None and download_mbps == download_mbps and download_mbps > 0:
+        dl = download_mbps
+        if dl >= 200:
+            z = 100.0
+        elif dl >= 100:
+            z = 85.0 + (dl - 100.0) / 100.0 * 15.0
+        elif dl >= 50:
+            z = 70.0 + (dl - 50.0) / 50.0 * 15.0
+        elif dl >= 25:
+            z = 50.0 + (dl - 25.0) / 25.0 * 20.0
+        else:
+            z = dl / 25.0 * 50.0
+        s += z * 0.5
+    with_hls = hls_qos is not None and hls_qos == hls_qos
+    if with_hls:
+        s += (hls_qos or 0.0) * 0.2
+    else:
+        s = s / 0.8
+    return round(s, 1)
+
+
+def _cabinet_qualify(download_mbps: float | None, jitter_ms: float | None,
+                     hls_mos: float | None = None,
+                     hls_qos: float | None = None) -> bool:
+    """Mirror of the cabinet's quality gate (X). A server may be selected as
+    'best' only if this passes — prevents picking a high-MOS but low-throughput
+    server that would stutter under real load."""
+    dl = download_mbps
+    j = jitter_ms
+    if dl is None or dl != dl or j is None or j != j:
+        return False
+    with_hls = hls_mos is not None and hls_mos == hls_mos and hls_qos is not None and hls_qos == hls_qos
+    if with_hls:
+        mos = hls_mos or 0.0
+        qos = hls_qos or 0.0
+        b = 0.0
+        if mos >= 4.5:
+            b += 30.0
+        elif mos >= 4.0:
+            b += 25.0
+        elif mos >= 3.5:
+            b += 20.0
+        elif mos >= 3.0:
+            b += 15.0
+        else:
+            b += (mos - 1.0) / 4.0 * 15.0
+        b += qos / 100.0 * 25.0
+        b += 25.0 if j < 2 else 20.0 if j < 5 else 15.0 if j < 10 else 10.0 if j < 20 else 5.0
+        if dl >= 100:
+            b += 20.0
+        elif dl >= 50:
+            b += 17.0
+        elif dl >= 30:
+            b += 14.0
+        elif dl >= 15:
+            b += 10.0
+        else:
+            b += dl / 15.0 * 10.0
+        return b >= 50.0
+    # without HLS: require decent throughput and low jitter
+    return j < 10.0 and dl > 30.0
+
+
 # --------------------------------------------------------------------------- #
 # State (thread-safe)
 # --------------------------------------------------------------------------- #
@@ -231,7 +309,17 @@ class State:
                 -(ping if ping is not None else 1e9))
 
     def _reselect_locked(self) -> None:
-        """Pick best host. Prefer fresh client measurements, else server-side."""
+        """Pick best host. Prefer fresh client measurements, else server-side.
+        Within a source, keep only servers that pass the cabinet quality gate
+        (_cabinet_qualify); among those pick the highest cabinet-style score.
+        If none pass the gate, fall back to the best by score/MOS anyway so we
+        still serve something rather than the static fallback."""
+
+        def qualifies(v: dict[str, Any]) -> bool:
+            return _cabinet_qualify(
+                v.get("download_mbps"), v.get("jitter_ms"),
+                v.get("hls_mos"), v.get("hls_qos"))
+
         now = time.time()
         fresh_client = {
             h: v for h, v in self.client_measurements.items()
@@ -239,8 +327,9 @@ class State:
             and (v.get("mos") is not None or v.get("score") is not None)
         }
         if fresh_client:
-            best = max(fresh_client.items(),
-                       key=lambda kv: self._score(kv[1]))
+            gated = {h: v for h, v in fresh_client.items() if qualifies(v)}
+            pool = gated or fresh_client
+            best = max(pool.items(), key=lambda kv: self._score(kv[1]))
             self.best_host = best[0]
             self.last_selection_source = "client"
             return
@@ -248,7 +337,9 @@ class State:
         ok = {h: v for h, v in self.measurements.items()
               if v.get("status") == "ok" and v.get("mos") is not None}
         if ok:
-            best = max(ok.items(), key=lambda kv: self._score(kv[1]))
+            gated = {h: v for h, v in ok.items() if qualifies(v)}
+            pool = gated or ok
+            best = max(pool.items(), key=lambda kv: self._score(kv[1]))
             self.best_host = best[0]
             self.last_selection_source = "server"
             return
@@ -656,6 +747,9 @@ def _measure_one(host: str, timeout: float, with_download: bool = True
                               out["loss_pct"], out["download_mbps"])
     out["mos"] = _compute_mos(out["ping_ms"], out["jitter_ms"],
                               out["loss_pct"], out["download_mbps"])
+    # cabinet-style score (no HLS on server side -> /0.8 renormalisation)
+    out["score"] = _cabinet_score(out["ping_ms"], out["jitter_ms"],
+                                  out["download_mbps"], None)
     out["status"] = "ok"
     return out
 
@@ -1349,7 +1443,7 @@ DASHBOARD_HTML = """<!doctype html>
       <div class="panel-row" style="margin-bottom:12px">
         <div class="field" style="flex:1;min-width:180px">
           <label>Логин (email)</label>
-          <input type="text" id="cabUser" placeholder="alexkuryshko" autocomplete="username"
+          <input type="text" id="cabUser" placeholder="cybrp@cybrp.com" autocomplete="username"
                  style="width:100%;background:var(--bg2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:9px;font-size:13px;font-family:ui-monospace,monospace">
         </div>
         <div class="field" style="flex:1;min-width:160px">
@@ -2866,16 +2960,10 @@ def main() -> int:
     _seed_data_dir()
     config = load_config()
     servers = load_servers()
-    # Default connection address = this machine's primary LAN IP, so the
-    # playlist URLs point where the player can actually reach us. The user can
-    # override it (e.g. "tv.cybr.com") via the dashboard.
-    if not config.get("connect_addr"):
-        config["connect_addr"] = detect_local_ip()
-        try:
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(config, f, indent=2, ensure_ascii=False)
-        except Exception:  # noqa: BLE001
-            pass
+    # Connection address is empty by default — the playlist handler falls back
+    # to the request Host header (the IP the user is browsing to) when it's
+    # empty. The user sets an explicit address (e.g. "tv.cybrp.com") via the
+    # dashboard only if they want a fixed public host in the playlist URLs.
     fallback = config.get("fallback_host", "ru3.hls.gd")
     client_ttl = int(config.get("client_measure_ttl_minutes", 60)) * 60
     rewrite_hosts = bool(config.get("rewrite_hosts", False))
