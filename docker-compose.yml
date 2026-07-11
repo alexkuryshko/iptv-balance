@@ -1,15 +1,40 @@
+# IPTV Balance — production docker-compose
+# Host port is configurable via .env (PORT). Container always listens on 80.
+# Create a .env next to this file:
+#   HOST_IP=0.0.0.0
+#   PORT=80          # <- change to 8180 on Synology (port 80 is taken by DSM)
+
 services:
   iptv-balance:
     image: alexkuryshko/iptv-balance:latest
     container_name: iptv-balance
     restart: unless-stopped
     ports:
-      - "80:80"
+      - "${HOST_IP:-0.0.0.0}:${PORT:-80}:80"
     environment:
       - HOST=0.0.0.0
       - PORT=80
     volumes:
       - iptv-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    mem_limit: 512m
+    cpus: 2.0
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','80')+'/api/status',timeout=5).read()\" || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
 
 volumes:
   iptv-data:
