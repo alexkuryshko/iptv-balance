@@ -38,7 +38,7 @@ docker run -d --name iptv-balance \
   -p 80:80 \
   -v iptv-data:/data \
   --restart unless-stopped \
-  cybrp/iptv-balance:latest
+  alexkuryshko/iptv-balance:latest
 ```
 
 или через docker-compose:
@@ -88,7 +88,7 @@ python3 server.py
 docker buildx create --use
 docker login
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t cybrp/iptv-balance:latest --push .
+  -t alexkuryshko/iptv-balance:latest --push .
 ```
 
 ## Эндпоинты

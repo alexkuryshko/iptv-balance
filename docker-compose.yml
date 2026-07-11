@@ -1,6 +1,6 @@
 services:
   iptv-balance:
-    image: cybrp/iptv-balance:latest
+    image: alexkuryshko/iptv-balance:latest
     container_name: iptv-balance
     restart: unless-stopped
     ports:

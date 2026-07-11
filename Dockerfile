@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 LABEL org.opencontainers.image.title="IPTV Balance"
 LABEL org.opencontainers.image.description="Auto-pick the best new.tv.team server, test speed (cabinet-style), proxy the playlist."
-LABEL org.opencontainers.image.source="https://github.com/cybrp/iptv-balance"
+LABEL org.opencontainers.image.source="https://github.com/alexkuryshko/iptv-balance"
 
 # Code (read-only)
 WORKDIR /app
