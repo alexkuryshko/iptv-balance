@@ -1054,37 +1054,51 @@ def warm_apply_playlist(state: State, cab: "CabinetState | None",
 
 
 def _apply_best_to_cabinet(state: State, cab: CabinetState,
-                           playlist_url: str, force: bool = False) -> None:
+                           playlist_url: str, force: bool = False,
+                           warm: bool = True) -> dict:
     """If logged in & auto_apply, set cabinet server to measured best host,
     then re-download the playlist (tokens get re-bound by the provider).
 
-    When force=True (manual "apply best" button, post-login) the hysteresis
-    guard is skipped — the user explicitly asked for the best server. In the
-    automatic worker path (force=False) we keep the current server unless the
-    best one is meaningfully better, to avoid invalidating the player's cached
-    playlist on every measurement cycle.
-    """
+    When force=True (manual "apply best" button, post-test auto-apply) the
+    hysteresis guard is skipped — the user explicitly asked for the best server.
+    In the automatic worker path (force=False) we keep the current server unless
+    the best one is meaningfully better, to avoid invalidating the player's
+    cached playlist on every measurement cycle.
+
+    Returns a result dict: {ok, applied, best_host, server_id, reason}.
+    `applied=True` means set_server was actually called and succeeded.
+    If warm=True, runs warm_apply_playlist after a successful set (slow, ~30s);
+    the HTTP endpoint passes warm=False and backgrounds warm_apply itself."""
+    res = {"ok": False, "applied": False, "best_host": None,
+           "server_id": None, "reason": ""}
     if not cab.user or not cab.password:
-        return
+        res["reason"] = "cabinet credentials not configured"
+        return res
     with state.lock:
         best_host = state.best_host
         src = state.last_selection_source
+    res["best_host"] = best_host
     if not best_host or src == "fallback":
+        res["reason"] = "best server not determined (no measurements)"
         print(f"[cabinet] auto-apply skip (no best/force={force})", flush=True)
-        return
+        return res
     if not force:
         with cab.lock:
             if not cab.logged_in or not cab.auto_apply:
-                return
+                res["reason"] = "not logged in or auto-apply off"
+                return res
     else:
         with cab.lock:
             if not cab.logged_in:
-                return
+                res["reason"] = "not logged into cabinet"
+                return res
     sid = _host_to_server_id(cab, best_host)
     if not sid:
         with cab.lock:
             cab.last_apply_error = f"сервер {best_host} не найден в списке кабинета"
-        return
+        res["reason"] = f"сервер {best_host} не найден в списке кабинета"
+        return res
+    res["server_id"] = sid
 
     # --- hysteresis: avoid flip-flopping the cabinet server on jitter ----- #
     # Each cabinet server change invalidates tokens in the player's cached
@@ -1106,9 +1120,10 @@ def _apply_best_to_cabinet(state: State, cab: CabinetState,
             cab.last_apply_error = ""
             cab.last_applied_id = sid
             cab.last_applied_at = time.time()
+        res.update(ok=True, applied=False, reason=f"already on best {best_host}")
         print(f"[cabinet] already on best {best_host}; no switch needed"
               f"{' (manual test)' if not force else ''}", flush=True)
-        return
+        return res
     if not force:
         MOS_HYSTERESIS = 0.3
         MOS_GOOD = 4.05  # current server at/above this is "good enough" (2 thumbs)
@@ -1126,7 +1141,9 @@ def _apply_best_to_cabinet(state: State, cab: CabinetState,
                   f"— current is good, no auto-switch", flush=True)
             with cab.lock:
                 cab.last_apply_error = ""
-            return
+            res.update(ok=True, applied=False,
+                       reason=f"keep current {cur_host} (good enough)")
+            return res
         should_switch = True
         if cur_mos is not None and best_mos is not None \
                 and cur_status == "ok" \
@@ -1138,12 +1155,14 @@ def _apply_best_to_cabinet(state: State, cab: CabinetState,
             print(f"[cabinet] {reason}", flush=True)
             with cab.lock:
                 cab.last_apply_error = ""
+            res.update(ok=True, applied=False, reason=reason)
         if not should_switch:
-            return
+            return res
         with cab.lock:
             if sid == cab.last_applied_id and cur_sid == sid \
                     and (time.time() - cab.last_applied_at) < 600:
-                return  # already applied recently
+                res.update(ok=True, applied=False, reason="already applied recently")
+                return res
     ok, err = cab.cabinet.set_server(sid)
     with cab.lock:
         if ok:
@@ -1152,12 +1171,14 @@ def _apply_best_to_cabinet(state: State, cab: CabinetState,
         cab.last_apply_error = "" if ok else err
     if not ok:
         print(f"[cabinet] set_server({sid}/{best_host}) failed: {err}", flush=True)
-        return
+        res["reason"] = f"set_server failed: {err}"
+        return res
     print(f"[cabinet] set groupId={sid} ({best_host}), re-fetching playlist",
           flush=True)
+    res.update(ok=True, applied=True, reason=f"applied {best_host}")
     cab.refresh_status()
-    if not playlist_url:
-        return
+    if not warm or not playlist_url:
+        return res
     # warm-apply: re-fetch the cabinet playlist each probe cycle (fresh token)
     # and swap once the new server serves real segments. Handles the ~30s
     # provider-side propagation delay without leaving the proxy on a dead token.
@@ -1166,6 +1187,7 @@ def _apply_best_to_cabinet(state: State, cab: CabinetState,
     except Exception as e:  # noqa: BLE001
         state.set_playlist_error(f"cabinet warm-apply: {type(e).__name__}: {e}")
         print(f"[cabinet] warm-apply error: {e}", flush=True)
+    return res
 
 
 def worker_cabinet(state: State, cab: CabinetState, playlist_url: str,
@@ -1806,16 +1828,29 @@ async function runTest(){
       await load();
     }
     $('#footStat').innerHTML = 'Готово. Протестировано '+results.length+' серверов (cabinet-style).';
-    // auto-apply best (highest score among qualified) — uses backend best_host (score-based)
+    // auto-apply best server after the test if the checkbox is on.
+    // Use the highest-score COMPLETED server (backend best_host is already
+    // score-based). Don't gate on the qualify filter — the user explicitly
+    // asked to apply the best, and the backend will pick the best available.
     if($('#cabAuto') && $('#cabAuto').checked){
-      const q = results.filter(r=>r.status==='completed' && CAB.qualify(r, withHls));
-      if(q.length){
-        q.sort((a,b)=>(b.score||0)-(a.score||0));
-        $('#footStat').innerHTML += ' Применяю лучший: <b>'+q[0].host+'</b> (score '+q[0].score+')…';
-        await fetch('/api/cabinet/apply-best',{method:'POST'});
+      const done = results.filter(r=>r.status==='completed' && r.score!=null);
+      if(done.length){
+        done.sort((a,b)=>(b.score||0)-(a.score||0));
+        $('#footStat').innerHTML += ' Применяю лучший: <b>'+done[0].host+'</b> (score '+done[0].score+')…';
+        try{
+          const r = await fetch('/api/cabinet/apply-best',{method:'POST'});
+          const ad = await r.json();
+          if(ad.applied){
+            $('#footStat').innerHTML += ' ✅ применён '+ad.best_host+'. Плейлист обновляется в фоне (~30с).';
+          } else {
+            $('#footStat').innerHTML += ' ℹ️ '+(ad.reason||'не применён');
+          }
+        }catch(e){
+          $('#footStat').innerHTML += ' ❌ ошибка применения: '+e;
+        }
         loadCabinet();
       } else {
-        $('#footStat').innerHTML += ' Нет серверов, прошедших фильтр качества.';
+        $('#footStat').innerHTML += ' Нет завершённых замеров — применять нечего.';
       }
     }
   }catch(e){ $('#footStat').textContent='Ошибка: '+e; }
@@ -2145,8 +2180,13 @@ async function cabApplyBest(){
   $('#cabBestBtn').disabled = true;
   $('#cabBestLabel').innerHTML = SVG('spinner','spin')+' Применяю…';
   try{
-    await fetch('/api/cabinet/apply-best',{method:'POST'});
-    $('#cabInfo').innerHTML = '<span style="color:var(--ok2)">✓ Запущено — лучший сервер применяется в кабинете, плейлист прогревается…</span>';
+    const r = await fetch('/api/cabinet/apply-best',{method:'POST'});
+    const d = await r.json();
+    if(d.applied){
+      $('#cabInfo').innerHTML = '<span style="color:var(--ok2)">✓ Применён '+d.best_host+' — плейлист прогревается в фоне (~30с)…</span>';
+    } else {
+      $('#cabInfo').innerHTML = '<span style="color:#facc15">ℹ️ '+(d.reason||'не применён')+'</span>';
+    }
     // warm-swap runs in background; poll cabinet + cards a few times
     let n=0;
     const poll = setInterval(()=>{ loadCabinet(); load(); if(++n>=6){ clearInterval(poll); } }, 3000);
@@ -2822,11 +2862,17 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/cabinet/apply-best":
             cfg = self.server.config  # type: ignore[attr-defined]
-            threading.Thread(
-                target=_apply_best_to_cabinet,
-                args=(st, cab, cfg.get("playlist_url", ""), True),
-                daemon=True).start()
-            self._send_json({"ok": True, "best_host": st.best_host})
+            purl = cfg.get("playlist_url", "")
+            # Decide + set synchronously (fast: login check, hysteresis/force,
+            # set_server) so the response reflects what actually happened. The
+            # slow warm-apply (playlist re-fetch + stub wait, ~30s) runs in the
+            # background so the HTTP call doesn't block.
+            res = _apply_best_to_cabinet(st, cab, purl, force=True, warm=False)
+            if res.get("applied") and purl:
+                threading.Thread(
+                    target=warm_apply_playlist,
+                    args=(st, cab, purl), daemon=True).start()
+            self._send_json(res)
             return
 
         self._send(404, b"not found\n", "text/plain; charset=utf-8")
