@@ -862,10 +862,11 @@ def detect_local_ip() -> str:
         return "127.0.0.1"
 
 
-def _base_from_authority(auth: str) -> str:
-    """Build an http base URL ('http://host[:port]/') from a free-form authority
+def _base_from_authority(auth: str, scheme: str = "http") -> str:
+    """Build a base URL ('<scheme>://host[:port]/') from a free-form authority
     string the user may type: 'tv.cybr.com', 'tv.cybr.com:8080',
-    'http://tv.cybr.com', etc. Empty -> '' (caller falls back to Host header)."""
+    'http://tv.cybr.com', etc. Empty -> '' (caller falls back to Host header).
+    `scheme` is 'http' or 'https' (chosen by the user in the dashboard)."""
     auth = (auth or "").strip()
     if not auth:
         return ""
@@ -876,7 +877,8 @@ def _base_from_authority(auth: str) -> str:
     auth = auth.rstrip("/")
     if not auth:
         return ""
-    return f"http://{auth}/"
+    scheme = "https" if (scheme or "").lower() == "https" else "http"
+    return f"{scheme}://{auth}/"
 
 
 def _upstream_serves_real(host: str, channel_path: str, token: str,
@@ -1307,6 +1309,11 @@ DASHBOARD_HTML = """<!doctype html>
       <div class="field" style="flex:1;min-width:240px">
         <label>Адрес подключения (как плеер обращается к сервису) — попадает в ссылки плейлиста</label>
         <div style="display:flex;gap:8px;align-items:stretch">
+          <select id="connScheme" onchange="updatePlaylistUrl()" title="Протокол ссылок плейлиста"
+                  style="background:var(--bg2);border:1px solid var(--border);color:var(--text);padding:9px 10px;border-radius:9px;font-size:13px;font-family:ui-monospace,monospace;flex:0 0 auto">
+            <option value="http">http://</option>
+            <option value="https">https://</option>
+          </select>
           <input type="text" id="connAddr" placeholder="cybrp.com  или  tv.cybrp.com  или  tv.cybrp.com:80"
                  style="flex:1;background:var(--bg2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:9px;font-size:13px;font-family:ui-monospace,monospace">
           <button class="copy-btn" id="applyConn" onclick="applyConnAddr()" title="Применить адрес" style="padding:9px 14px;font-size:13px">✅ Применить</button>
@@ -1728,7 +1735,9 @@ async function loadConfig(){
     const d = await r.json();
     $('#plUrl').value = d.playlist_url || '';
     $('#connAddr').value = d.connect_addr || '';
+    $('#connScheme').value = (d.connect_scheme || 'http') === 'https' ? 'https' : 'http';
     cfgConnectAddr = d.connect_addr || '';
+    cfgConnectScheme = d.connect_scheme || 'http';
     updatePlInfo(d);
     updatePlaylistUrl();
   }catch(e){ $('#plInfo').textContent = 'Ошибка загрузки настроек: '+e; }
@@ -1746,15 +1755,17 @@ function updatePlInfo(d){
 async function saveConfig(){
   const url = $('#plUrl').value.trim();
   const conn = $('#connAddr').value.trim();
+  const sch = $('#connScheme').value;
   if(!url){ $('#plInfo').innerHTML = '<span style="color:#fca5a5">Введите ссылку</span>'; return; }
   $('#saveBtn').disabled = true;
   $('#saveLabel').innerHTML = SVG('spinner','spin')+' Сохраняю…';
   try{
     const r = await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({playlist_url: url, connect_addr: conn})});
+      body: JSON.stringify({playlist_url: url, connect_addr: conn, connect_scheme: sch})});
     const d = await r.json();
     if(d.ok){
       cfgConnectAddr = d.connect_addr || conn;
+      cfgConnectScheme = d.connect_scheme || sch;
       $('#saveLabel').textContent = '✓ Сохранено';
       await load();
       await loadConfig();
@@ -1791,6 +1802,7 @@ async function downloadPlaylistFile(){
 }
 setView(viewMode);
 let cfgConnectAddr = '';
+let cfgConnectScheme = 'http';
 let playlistsLoaded = false;
 // extract playListId from a hls.gd/pl/<id>/... URL (for matching the dropdown)
 function plIdFromUrl(u){ const m = (u||'').match(/\/pl\/(\d+)\//); return m ? m[1] : ''; }
@@ -1830,25 +1842,29 @@ function plToggleCustom(){
 })();
 function playlistOrigin(){
   const a = (cfgConnectAddr||'').trim();
+  const sch = (cfgConnectScheme||'http') === 'https' ? 'https' : 'http';
   if(!a) return location.origin;
   let s = a.replace(/^https?:\/\//i,'').replace(/\/+$/,'');
-  return 'http://'+s;
+  return sch+'://'+s;
 }
 function updatePlaylistUrl(){
   const el = $('#url'); if(el) el.value = playlistOrigin()+'/plst.m3u8';
 }
 async function applyConnAddr(){
   const conn = ($('#connAddr').value||'').trim();
+  const sch = $('#connScheme').value;
   const btn = $('#applyConn');
   btn.disabled = true; const old=btn.textContent; btn.textContent='⏳ Применяю…';
   try{
     const r = await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({connect_addr: conn})});
+      body: JSON.stringify({connect_addr: conn, connect_scheme: sch})});
     const d = await r.json();
     if('connect_addr' in d){
       const eff = (d.connect_addr||'').trim();
       cfgConnectAddr = eff || conn;
+      cfgConnectScheme = d.connect_scheme || sch;
       if(eff) $('#connAddr').value = eff;   // show resolved IP when empty was applied
+      $('#connScheme').value = (cfgConnectScheme||'http') === 'https' ? 'https' : 'http';
       updatePlaylistUrl();
       btn.textContent='✓'; setTimeout(()=>btn.textContent=old,1200);
     } else {
@@ -2369,12 +2385,14 @@ class Handler(BaseHTTPRequestHandler):
             # reach us, e.g. "tv.cybr.com") so the playlist is valid regardless
             # of how this request arrived. Fall back to the request Host header.
             cfg = self.server.config  # type: ignore[attr-defined]
-            base = _base_from_authority(cfg.get("connect_addr", "") or "")
+            scheme = (cfg.get("connect_scheme", "http") or "http").lower()
+            scheme = "https" if scheme == "https" else "http"
+            base = _base_from_authority(cfg.get("connect_addr", "") or "", scheme)
             if not base:
                 host_hdr = self.headers.get("Host", "")
                 if host_hdr:
                     hh, _, port = host_hdr.partition(":")
-                    base = f"http://{hh}" + (f":{port}" if port and port != "80" else "")
+                    base = f"{scheme}://{hh}" + (f":{port}" if port and port != "80" else "")
                     base = base + "/"
             data = st.served_playlist(base)
             if not data:
@@ -2398,6 +2416,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({
                     "playlist_url": cfg.get("playlist_url", ""),
                     "connect_addr": cfg.get("connect_addr", "") or "",
+                    "connect_scheme": cfg.get("connect_scheme", "http") or "http",
                     "has_playlist": bool(st.playlist_raw),
                     "playlist_size": len(st.playlist_raw),
                     "playlist_age_sec": int(time.time() - st.playlist_updated_at) if st.playlist_updated_at else None,
@@ -2521,6 +2540,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             url = (payload.get("playlist_url") or "").strip()
             conn = (payload.get("connect_addr") or "").strip()
+            scheme_in = (payload.get("connect_scheme") or "").strip().lower()
+            scheme = "https" if scheme_in == "https" else "http" if scheme_in == "http" else ""
             cfg = self.server.config  # type: ignore[attr-defined]
             # playlist_url is required overall (must already be set); reject only
             # if the user is actively clearing it.
@@ -2542,6 +2563,8 @@ class Handler(BaseHTTPRequestHandler):
                             hh, _, port = host_hdr.partition(":")
                             conn = hh + (f":{port}" if port and port != "80" else "")
                     cfg["connect_addr"] = conn
+                if scheme:
+                    cfg["connect_scheme"] = scheme
                 with open(CONFIG_PATH, "w", encoding="utf-8") as f:
                     json.dump(cfg, f, indent=2, ensure_ascii=False)
             except Exception as e:  # noqa: BLE001
@@ -2561,6 +2584,7 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": bool(size), "size": size, "error": err,
                 "playlist_url": cfg.get("playlist_url", ""),
                 "connect_addr": cfg.get("connect_addr", "") or "",
+                "connect_scheme": cfg.get("connect_scheme", "http") or "http",
             })
             return
 

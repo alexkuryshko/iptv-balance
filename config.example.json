@@ -13,5 +13,6 @@
   "cabinet_api_base": "https://new.tv.team",
   "cabinet_user": "",
   "cabinet_password": "",
-  "connect_addr": ""
+  "connect_addr": "",
+  "connect_scheme": "http"
 }
