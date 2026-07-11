@@ -20,4 +20,7 @@ RUN cp -n config.example.json config.json
 VOLUME ["/data"]
 EXPOSE 80
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD python3 -c "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','80')+'/api/status',timeout=5).read()" || exit 1
+
 CMD ["python3", "/app/server.py"]
